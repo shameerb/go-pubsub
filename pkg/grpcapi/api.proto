@@ -4,11 +4,12 @@ package grpcapi;
 
 option go_package = "github.com/shameerb/go-pubsub/pkg/grpcapi";
 
-service PubSubServce {
-    rpc Publish(PublishRequest) returns (PublishResponse);
-    rpc Subscribe(SubscribeRequest) returns (stream Message);
-    rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
+service PubSubService {
+    rpc Publish(PublishRequest) returns (PublishResponse) {}
+    rpc Subscribe(SubscriberRequest) returns (stream Message) {}
+    rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse) {}
 }
+
 
 message PublishRequest {
     string topic = 1;
@@ -19,9 +20,9 @@ message PublishResponse {
     bool success = 1;
 }
 
-message SubscribeRequest {
-    uint32 subscriber_id = 1;
-    string topic = 2;
+message SubscriberRequest {
+    string topic = 1;
+    uint32 subscriber_id = 2;
 }
 
 message Message {
@@ -30,8 +31,8 @@ message Message {
 }
 
 message UnsubscribeRequest {
-    uint32 subriber_id = 1;
-    string topic = 2;
+    string topic = 1;
+    uint32 subscriber_id = 2;
 }
 
 message UnsubscribeResponse {
