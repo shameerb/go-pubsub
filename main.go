@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shameerb/go-pubsub/pkg/pubsub"
+	pubsub "github.com/shameerb/go-pubsub/pkg/pubsub"
 )
 
 // this code is for testing purpose of the pub sub api.
