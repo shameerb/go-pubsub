@@ -1,2 +1,2 @@
 # go-pubsub
-Publisher Subscriber extension 
+Publisher Subscriber extension
