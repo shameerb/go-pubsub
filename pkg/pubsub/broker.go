@@ -14,53 +14,55 @@ import (
 	"google.golang.org/grpc"
 )
 
-type subscriberStream pb.PubSubService_SubscribeServer
-
+/*
+broker accepts publish request, keeps a grpc server open for publisher and consumers to connect to
+implements the grpc service interface
+publish, subscribe, unsubscribe
+holds the mapping of topic to their corresponding list of subsribers
+*/
 type streamKey struct {
 	topic        string
-	subscriberID uint32
+	subscriberId uint32
 }
 
+type subscriberStream pb.BrokerService_SubscribeServer
+
 type Broker struct {
-	pb.UnimplementedPubSubServiceServer
-	port                  string
-	listener              net.Listener
-	grpcServer            *grpc.Server
-	subscribers           map[string]map[uint32]subscriberStream
-	topicSubscribersMutex map[streamKey]*sync.Mutex // avoiding multiple producers to write on the same stream and cause a lock. Streams do not allow that.
-	mu                    sync.RWMutex              // mutex to write to this map. RW because writes are sparse. Reads occur on each publish. Writes occur on subscription and unsubscription
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	// (optional) Use a zap logger to avoid serialization latency in reflection serialization while logging.
+	pb.UnimplementedBrokerServiceServer
+	port                 string
+	listener             net.Listener
+	grpcServer           *grpc.Server
+	subscribers          map[string]map[uint32]subscriberStream
+	mu                   *sync.RWMutex             // mutex to write to the subscriber map without inconsistency from concurrent subscribers. Concurrent reads are fine.
+	topicSubscriberLocks map[streamKey]*sync.Mutex // avoiding multiple producers to write on the same stream and cause a lock. Streams do not allow that.
+	ctx                  context.Context
+	cancel               context.CancelFunc
 }
 
 func NewBroker(port string) *Broker {
 	ctx, cancel := context.WithCancel(context.Background())
-
-	return &Broker{
-		port:                  port,
-		subscribers:           make(map[string]map[uint32]subscriberStream),
-		topicSubscribersMutex: make(map[streamKey]*sync.Mutex),
-		mu:                    sync.RWMutex{},
-		ctx:                   ctx,
-		cancel:                cancel,
+	b := &Broker{
+		port:                 port,
+		ctx:                  ctx,
+		cancel:               cancel,
+		subscribers:          make(map[string]map[uint32]subscriberStream),
+		mu:                   &sync.RWMutex{},
+		topicSubscriberLocks: make(map[streamKey]*sync.Mutex),
 	}
-
+	return b
 }
 
 func (b *Broker) Start() error {
-	// start a grpc server
 	var err error
 	b.listener, err = net.Listen("tcp", b.port)
 	if err != nil {
-		log.Fatalf("Failed to start grpc server")
+		log.Fatalf("Unable to create listener for grpc service : %v", err)
 	}
+
 	b.grpcServer = grpc.NewServer()
-	pb.RegisterPubSubServiceServer(b.grpcServer, b)
-	// start the server
 	go func() {
 		if err := b.grpcServer.Serve(b.listener); err != nil {
-			log.Fatalf("Failed to start the grpc server: %v", err)
+			log.Fatalf("Failed to start grpc server: %v", err)
 		}
 	}()
 	return b.awaitShutdown()
@@ -70,81 +72,74 @@ func (b *Broker) awaitShutdown() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
-	return b.Stop()
+	return b.stop()
 }
 
-func (b *Broker) Stop() error {
+func (b *Broker) stop() error {
 	b.grpcServer.GracefulStop()
-	// close all the streams.
 	return b.listener.Close()
 }
 
-func (b *Broker) Subscribe(in *pb.SubscriberRequest, stream pb.PubSubService_SubscribeServer) error {
+func (b *Broker) Subscribe(req *pb.SubscribeRequest, stream pb.BrokerService_SubscribeServer) error {
 	b.mu.Lock()
-
-	key := streamKey{topic: in.Topic, subscriberID: in.SubscriberId}
+	key := streamKey{topic: req.Topic, subscriberId: req.Id}
 	if _, ok := b.subscribers[key.topic]; !ok {
 		b.subscribers[key.topic] = make(map[uint32]subscriberStream)
 	}
-	b.subscribers[key.topic][key.subscriberID] = stream
-	b.topicSubscribersMutex[key] = &sync.Mutex{}
+	b.subscribers[key.topic][key.subscriberId] = stream
+	b.topicSubscriberLocks[key] = &sync.Mutex{}
 	b.mu.Unlock()
-	// this ensures that the stream is not closed.
+	// Keep the stream open until the context is closed, during which it sends a nil on the stream to indicate closed.
 	for {
 		select {
-		// Wait for the client to close the stream
 		case <-stream.Context().Done():
 			return nil
-			// Wait for the broker to shutdown
 		case <-b.ctx.Done():
 			return nil
 		}
 	}
 }
 
-func (b *Broker) Unsubscribe(ctx context.Context, in *pb.UnsubscribeRequest) (*pb.UnsubscribeResponse, error) {
+func (b *Broker) Unsubscribe(ctx context.Context, req *pb.UnsubscribeRequest) (*pb.UnsubscribeResponse, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	key := streamKey{topic: in.Topic, subscriberID: in.SubscriberId}
+	key := streamKey{topic: req.Topic, subscriberId: req.Id}
 	if _, ok := b.subscribers[key.topic]; !ok {
 		return &pb.UnsubscribeResponse{Success: false}, nil
 	}
-
-	if _, ok := b.subscribers[key.topic][key.subscriberID]; !ok {
+	if _, ok := b.subscribers[key.topic][key.subscriberId]; !ok {
 		return &pb.UnsubscribeResponse{Success: false}, nil
 	}
-
-	delete(b.subscribers[key.topic], key.subscriberID)
-	delete(b.topicSubscribersMutex, key)
+	delete(b.subscribers[key.topic], key.subscriberId)
+	delete(b.topicSubscriberLocks, key)
 	return &pb.UnsubscribeResponse{Success: true}, nil
 }
 
-func (b *Broker) Publish(ctx context.Context, in *pb.PublishRequest) (*pb.PublishResponse, error) {
+func (b *Broker) Publish(ctx context.Context, req *pb.PublishRequest) (*pb.PublishResponse, error) {
 	b.mu.RLock()
-	brokerSubscribers := make([]streamKey, 0)
-	for subscriberId, stream := range b.subscribers[in.Topic] {
-		key := streamKey{topic: in.Topic, subscriberID: subscriberId}
-		b.topicSubscribersMutex[key].Lock()
-		err := stream.Send(&pb.Message{Topic: in.Topic, Message: in.Message})
-		b.topicSubscribersMutex[key].Unlock()
+	erroredSubscribers := make([]streamKey, 0)
+	for id, stream := range b.subscribers[req.Topic] {
+		key := streamKey{topic: req.Topic, subscriberId: id}
+		b.topicSubscriberLocks[key].Lock()
+		err := stream.Send(&pb.Data{Topic: req.Topic, Data: req.Data})
+		b.topicSubscriberLocks[key].Unlock()
 		if err != nil {
-			brokerSubscribers = append(brokerSubscribers, key)
+			erroredSubscribers = append(erroredSubscribers, key)
 		}
 	}
 	b.mu.RUnlock()
-	b.removeBrokenSubscribers(brokerSubscribers)
-	if len(brokerSubscribers) > 0 {
-		return &pb.PublishResponse{Success: false}, fmt.Errorf("failed to send to some subscribers")
+	b.removeErroredSubscribers(erroredSubscribers)
+	if len(erroredSubscribers) > 0 {
+		return &pb.PublishResponse{Success: false}, fmt.Errorf("failed to send to a few subscribers")
 	}
 	return &pb.PublishResponse{Success: true}, nil
 }
 
-func (b *Broker) removeBrokenSubscribers(keys []streamKey) {
+func (b *Broker) removeErroredSubscribers(erroredSubscribers []streamKey) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// do I need to close the stream somehow? send a ctx done signal to the respective streams that would be open.
-	for _, key := range keys {
-		delete(b.subscribers[key.topic], key.subscriberID)
-		delete(b.topicSubscribersMutex, key)
+	for _, key := range erroredSubscribers {
+		delete(b.subscribers[key.topic], key.subscriberId)
+		delete(b.topicSubscriberLocks, key)
 	}
 }

@@ -30,8 +30,8 @@ func main() {
 		if err := consumer.Subscribe("mytopic"); err != nil {
 			log.Fatalf("Issue while subscribing for %v: %v", consumer.ID, err)
 		}
-		for msg := range consumer.Messages {
-			fmt.Printf("Received message: %v, %v, %s \n", consumer.ID, msg.Topic, string(msg.Message))
+		for msg := range consumer.Message {
+			fmt.Printf("Received message: %v, %v, %s \n", consumer.ID, msg.Topic, string(msg.Data))
 		}
 	}
 	for i := 0; i < 3; i++ {

@@ -11,42 +11,40 @@ import (
 
 // responsible for sending messages for a topic to a broker service
 type Publisher struct {
-	brokerAddress string
-	conn          *grpc.ClientConn
-	client        pb.PubSubServiceClient // client to connect to the broker service
-	ctx           context.Context
-	cancel        context.CancelFunc
+	brokerAddr   string
+	brokerConn   *grpc.ClientConn
+	brokerClient pb.BrokerServiceClient
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
-func NewPublisher(brokerAddress string) (*Publisher, error) {
+func NewPublisher(brokerAddrr string) (*Publisher, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	publisher := &Publisher{
-		brokerAddress: brokerAddress,
-		ctx:           ctx,
-		cancel:        cancel,
+	p := &Publisher{
+		brokerAddr: brokerAddrr,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
 	var err error
-	publisher.conn, err = grpc.Dial(
-		publisher.brokerAddress,
+	p.brokerConn, err = grpc.Dial(
+		p.brokerAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
 	if err != nil {
-		return nil, fmt.Errorf("gRPC connection to broker failed %v", err)
+		return nil, fmt.Errorf("grpc connection to broker failed: %v", err)
 	}
-
-	publisher.client = pb.NewPubSubServiceClient(publisher.conn)
-
-	return publisher, nil
+	p.brokerClient = pb.NewBrokerServiceClient(p.brokerConn)
+	return p, nil
 }
 
-func (p *Publisher) Publish(topic string, message []byte) error {
-	_, err := p.client.Publish(p.ctx, &pb.PublishRequest{Topic: topic, Message: message})
+func (p *Publisher) Publish(topic string, data []byte) error {
+	_, err := p.brokerClient.Publish(p.ctx, &pb.PublishRequest{Topic: topic, Data: data})
 	return err
 }
 
 func (p *Publisher) Close() error {
 	p.cancel()
-	return p.conn.Close()
+	return p.brokerConn.Close()
 }
